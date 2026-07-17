@@ -1,3 +1,18 @@
+"""
+Script de Integração e Processamento de Preços de Petróleo e Combustíveis.
+
+Este script realiza o pipeline ETL completo:
+1. Extração: Baixa os preços diários de fechamento do barril de petróleo Brent (EIA),
+   as taxas de câmbio comerciais diárias do Dólar para Real (Banco Central do Brasil),
+   e a série histórica de preços nacionais de combustíveis (ANP) mensais/semanais.
+2. Transformação: Normaliza os dados dos combustíveis de interesse, pivota as séries de
+   preços por combustível, cria um grid diário de datas unificado, preenche lacunas
+   temporais (forward fill) e calcula o preço diário do barril em Reais (BRL).
+3. Carga: Salva o DataFrame consolidado em um arquivo CSV de saída delimitado por ';'
+   e gera um arquivo correspondente no formato Tableau Extrato (.hyper) para fácil
+   visualização no Tableau Workbook.
+"""
+
 import pandas as pd
 import requests
 import io
@@ -191,6 +206,42 @@ def standardize_anp_df(df):
         return df
     return pd.DataFrame()
 
+def csv_to_hyper(csv_path, hyper_path):
+    """
+    Lê o arquivo CSV consolidado e o converte para o formato .hyper do Tableau.
+    
+    Esta rotina lê o CSV respeitando o separador ';' e a vírgula para números decimais.
+    Em seguida, converte a coluna DATA em datetime e salva o extrato no formato Hyper,
+    utilizando o esquema 'Extract' e a tabela 'Extract' exigidos pelo Tableau Workbook.
+    
+    Parâmetros:
+        csv_path (str): Caminho para o arquivo CSV de entrada.
+        hyper_path (str): Caminho de saída onde o arquivo .hyper será criado.
+    """
+    print(f"Iniciando a conversão de {csv_path} para {hyper_path}...")
+    try:
+        import pantab
+        from tableauhyperapi import TableName
+        
+        # Lê o CSV respeitando o delimitador de ponto e vírgula e a vírgula para decimais
+        df = pd.read_csv(csv_path, sep=';', decimal=',')
+        
+        # Converte a coluna DATA para datetime
+        df['DATA'] = pd.to_datetime(df['DATA'])
+        
+        # Define a tabela no esquema 'Extract' (padrão de extração do Tableau)
+        table = TableName("Extract", "Extract")
+        
+        # Salva o DataFrame no formato .hyper
+        pantab.frame_to_hyper(df, hyper_path, table=table)
+        print(f"Arquivo .hyper gerado com sucesso em: {hyper_path}")
+        
+    except ImportError:
+        print("Erro: As dependências 'pantab' ou 'tableauhyperapi' não estão instaladas.")
+        print("Por favor, execute: pip install pantab tableauhyperapi")
+    except Exception as e:
+        print(f"Erro ao converter CSV para .hyper: {e}")
+
 def download_and_process():
     """
     Função principal que coordena o fluxo ETL (Extração, Transformação e Carga) dos dados:
@@ -303,6 +354,11 @@ def download_and_process():
     output_files = "historico_precos_combustiveis.csv"
     daily_df.to_csv(output_files, index=False, sep=';', decimal=',')
     print(f"Arquivo salvo com sucesso: {output_files}")
+    
+    # Gera o arquivo .hyper com base no CSV recém-salvo
+    hyper_file = "historico_precos_combustiveis.hyper"
+    csv_to_hyper(output_files, hyper_file)
+    
     print("Amostra dos dados (Início):")
     print(daily_df.head())
     print("Amostra dos dados (Fim):")
