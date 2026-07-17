@@ -57,7 +57,7 @@ def download_eia_brent():
         print(f"Erro ao baixar dados do Brent diários: {e}")
         return pd.DataFrame(columns=["DATA", "Barril US$"])
 
-def download_bcb_usd():
+def download_bcb_usd(start_year=2001):
     """
     Realiza o download das taxas de câmbio diárias do Dólar Comercial (venda) do Banco Central do Brasil.
     Série SGS: 10813.
@@ -66,12 +66,15 @@ def download_bcb_usd():
     para intervalos muito longos, a busca histórica é segmentada em lotes (chunks) de 4 anos e conta
     com um mecanismo de repetição automática (retry) em caso de erro temporário.
     
+    Parâmetros:
+        start_year (int): Ano inicial para buscar as cotações (padrão 2001).
+        
     Retorna:
         pd.DataFrame: DataFrame contendo as colunas ['DATA', 'US$'].
     """
     import time
-    print("Baixando dados do Dólar diário (BCB)...")
-    start_year = 2001
+    print(f"Baixando dados do Dólar diário (BCB) a partir de {start_year}...")
+    start_year = start_year
     end_year = datetime.today().year
     
     all_data = []
@@ -242,127 +245,182 @@ def csv_to_hyper(csv_path, hyper_path):
     except Exception as e:
         print(f"Erro ao converter CSV para .hyper: {e}")
 
-def download_and_process():
+def download_and_process(full_load=False):
     """
-    Função principal que coordena o fluxo ETL (Extração, Transformação e Carga) dos dados:
-    1. Realiza o download dos dados de combustíveis da ANP (mesclando dados mensais para 2001-2004 e semanais pós-2004).
-    2. Limpa e padroniza os produtos selecionados (Gasolina, Etanol, Diesel, GLP, Diesel S10).
-    3. Pivota a base para que cada combustível vire uma coluna.
-    4. Faz o download diário do preço do Brent (EIA) e Dólar comercial (BCB).
-    5. Cria um índice temporal diário completo do início da série até hoje.
-    6. Mescla as fontes diárias, mensais e semanais e preenche as lacunas temporais (fins de semana, feriados
-       e dias intermediários da semana/mês) usando forward fill (ffill).
-    7. Calcula o preço diário do barril em Reais (BRL).
-    8. Salva o resultado final consolidado em um arquivo CSV.
-    """
-    print("Iniciando download e processamento dos dados da ANP...")
+    Função principal que coordena o fluxo ETL (Extração, Transformação e Carga) dos dados.
+    Suporta execução incremental por padrão ou carga completa (full load).
     
+    Parâmetros:
+        full_load (bool): Se True, força a carga completa de todo o histórico desde 2001.
+    """
+    output_files = "historico_precos_combustiveis.csv"
+    max_date_existing = None
+    df_existing = None
+    
+    # Passo 1: Verificar se existe histórico local para carga incremental
+    if not full_load and os.path.exists(output_files):
+        try:
+            print(f"Arquivo existente encontrado: {output_files}. Lendo histórico para carga incremental...")
+            df_existing = pd.read_csv(output_files, sep=';', decimal=',')
+            df_existing["DATA"] = pd.to_datetime(df_existing["DATA"])
+            max_date_existing = df_existing["DATA"].max()
+            print(f"Maior data encontrada no histórico: {max_date_existing.strftime('%Y-%m-%d')}")
+        except Exception as e:
+            print(f"Erro ao ler histórico existente ({e}). Executando carga completa por segurança.")
+            max_date_existing = None
+            df_existing = None
+            
+    if max_date_existing is None:
+        print("Executando carga completa (full load) desde 2001...")
+    else:
+        print(f"Executando carga incremental a partir de: {max_date_existing.strftime('%Y-%m-%d')}")
+        
     # Links de download da ANP (Série mensal para os anos iniciais e série semanal a partir de 2004).
     url_mensal_2001_2012 = "https://www.gov.br/anp/pt-br/assuntos/precos-e-defesa-da-concorrencia/precos/precos-revenda-e-de-distribuicao-combustiveis/shlp/2001-2012/mensal-brasil-2001-a-2012.xlsx"
     url_semanal_2004_2012 = "https://www.gov.br/anp/pt-br/assuntos/precos-e-defesa-da-concorrencia/precos/precos-revenda-e-de-distribuicao-combustiveis/shlp/2001-2012/semanal-brasil-2004-a-2012.xlsx"
     url_semanal_2013_present = "https://www.gov.br/anp/pt-br/assuntos/precos-e-defesa-da-concorrencia/precos/precos-revenda-e-de-distribuicao-combustiveis/shlp/semanal/semanal-brasil-desde-2013.xlsx"
 
-    # 1. Faz o download e padroniza cada arquivo de combustíveis
-    df_mensal = download_anp_file(url_mensal_2001_2012, "Mensal 2001-2012")
-    df_semanal_1 = download_anp_file(url_semanal_2004_2012, "Semanal 2004-2012")
-    df_semanal_2 = download_anp_file(url_semanal_2013_present, "Semanal 2013-Presente")
+    # Passo 2: Download inteligente dos arquivos de combustíveis da ANP
+    df_mensal_std = pd.DataFrame()
+    df_semanal_1_std = pd.DataFrame()
+    df_semanal_2_std = pd.DataFrame()
     
-    df_mensal_std = standardize_anp_df(df_mensal)
-    df_semanal_1_std = standardize_anp_df(df_semanal_1)
-    df_semanal_2_std = standardize_anp_df(df_semanal_2)
-    
-    # A série semanal de preços da ANP iniciou-se em 2004-05-09.
-    # Filtramos os dados mensais para manter apenas o período anterior, evitando duplicidades.
-    if not df_mensal_std.empty:
-        df_mensal_std = df_mensal_std[df_mensal_std["DATA"] < pd.to_datetime("2004-05-09")]
-        print(f"Dados mensais filtrados para antes de 2004-05-09. Linhas: {len(df_mensal_std)}")
+    if max_date_existing is None or max_date_existing < pd.to_datetime("2004-05-09"):
+        df_mensal = download_anp_file(url_mensal_2001_2012, "Mensal 2001-2012")
+        df_mensal_std = standardize_anp_df(df_mensal)
+        if not df_mensal_std.empty:
+            df_mensal_std = df_mensal_std[df_mensal_std["DATA"] < pd.to_datetime("2004-05-09")]
+            if max_date_existing is not None:
+                df_mensal_std = df_mensal_std[df_mensal_std["DATA"] > max_date_existing]
 
-    # Combina os DataFrames da ANP em uma base única de combustíveis.
+    if max_date_existing is None or max_date_existing < pd.to_datetime("2013-01-01"):
+        df_semanal_1 = download_anp_file(url_semanal_2004_2012, "Semanal 2004-2012")
+        df_semanal_1_std = standardize_anp_df(df_semanal_1)
+        if not df_semanal_1_std.empty and max_date_existing is not None:
+            df_semanal_1_std = df_semanal_1_std[df_semanal_1_std["DATA"] > max_date_existing]
+
+    if max_date_existing is None or max_date_existing < datetime.today():
+        df_semanal_2 = download_anp_file(url_semanal_2013_present, "Semanal 2013-Presente")
+        df_semanal_2_std = standardize_anp_df(df_semanal_2)
+        if not df_semanal_2_std.empty and max_date_existing is not None:
+            df_semanal_2_std = df_semanal_2_std[df_semanal_2_std["DATA"] > max_date_existing]
+
+    # Combina os DataFrames da ANP em uma base única de novos combustíveis
     dataframes = [df_mensal_std, df_semanal_1_std, df_semanal_2_std]
     dataframes = [d for d in dataframes if not d.empty]
     
-    if not dataframes:
-        print("Nenhum dado da ANP foi carregado.")
-        return
+    final_df = pd.DataFrame()
+    if dataframes:
+        full_df = pd.concat(dataframes, ignore_index=True)
+        
+        # Normaliza a nomenclatura de alguns combustíveis para compatibilidade histórica.
+        full_df['COMBUSTIVEL'] = full_df['COMBUSTIVEL'].replace({
+            'OLEO DIESEL': 'ÓLEO DIESEL',
+            'OLEO DIESEL S10': 'ÓLEO DIESEL S10'
+        })
+        
+        # Filtra apenas os combustíveis de interesse no projeto.
+        target_products = ["GASOLINA COMUM", "ETANOL HIDRATADO", "ÓLEO DIESEL", "GLP", "ÓLEO DIESEL S10"]
+        full_df = full_df[full_df['COMBUSTIVEL'].isin(target_products)]
+        
+        if not full_df.empty:
+            print("Processando e formatando novos dados da ANP...")
+            final_df = full_df.pivot_table(index='DATA', columns='COMBUSTIVEL', values='PRECO', aggfunc='first')
+            final_df.reset_index(inplace=True)
+            final_df["DATA"] = pd.to_datetime(final_df["DATA"])
 
-    full_df = pd.concat(dataframes, ignore_index=True)
-    
-    # Normaliza a nomenclatura de alguns combustíveis para compatibilidade histórica.
-    full_df['COMBUSTIVEL'] = full_df['COMBUSTIVEL'].replace({
-        'OLEO DIESEL': 'ÓLEO DIESEL',
-        'OLEO DIESEL S10': 'ÓLEO DIESEL S10'
-    })
-    
-    # Filtra apenas os combustíveis de interesse no projeto.
-    target_products = ["GASOLINA COMUM", "ETANOL HIDRATADO", "ÓLEO DIESEL", "GLP", "ÓLEO DIESEL S10"]
-    full_df = full_df[full_df['COMBUSTIVEL'].isin(target_products)]
-    
-    print("Processando e formatando dados...")
-    
-    # Pivota os combustíveis de linhas para colunas (Gasolina, Etanol, etc. viram colunas da tabela).
-    final_df = full_df.pivot_table(index='DATA', columns='COMBUSTIVEL', values='PRECO', aggfunc='first')
-    
-    # Reseta o índice para que a DATA volte a ser uma coluna comum.
-    final_df.reset_index(inplace=True)
-    final_df["DATA"] = pd.to_datetime(final_df["DATA"])
-    
     # --- Integração de Fontes Externas Diárias ---
     
     # 1. Busca os dados diários do preço do barril de petróleo Brent (em USD)
     df_brent = download_eia_brent()
+    if not df_brent.empty and max_date_existing is not None:
+        df_brent = df_brent[df_brent["DATA"] > max_date_existing]
         
     # 2. Busca a taxa de câmbio diária do Dólar Comercial (compra)
-    df_usd = download_bcb_usd()
-    
-    # Cria o grid diário completo que cobre todo o período histórico de análise.
-    start_date = final_df["DATA"].min()
+    start_year_usd = 2001 if max_date_existing is None else max_date_existing.year
+    df_usd = download_bcb_usd(start_year=start_year_usd)
+    if not df_usd.empty and max_date_existing is not None:
+        df_usd = df_usd[df_usd["DATA"] > max_date_existing]
+        
+    # Define a data limite da análise
     end_date = datetime.today()
     if not df_brent.empty:
         end_date = max(end_date, df_brent["DATA"].max())
     if not df_usd.empty:
         end_date = max(end_date, df_usd["DATA"].max())
         
-    print(f"Criando grid diário de {start_date.strftime('%Y-%m-%d')} até {end_date.strftime('%Y-%m-%d')}...")
-    daily_df = pd.DataFrame({"DATA": pd.date_range(start=start_date, end=end_date, freq="D")})
-    
-    # Mescla o Brent diário no grid e preenche finais de semana e feriados (ffill).
-    if not df_brent.empty:
-        daily_df = pd.merge(daily_df, df_brent, on="DATA", how="left")
-        daily_df["Barril US$"] = daily_df["Barril US$"].ffill()
+    # Define o início do novo período de grid
+    if max_date_existing is not None:
+        start_date = max_date_existing + pd.Timedelta(days=1)
+    else:
+        start_date = final_df["DATA"].min() if not final_df.empty else pd.to_datetime("2001-07-01")
+
+    # Verifica se há novas datas a processar
+    if start_date <= end_date:
+        print(f"Criando grid diário de {start_date.strftime('%Y-%m-%d')} até {end_date.strftime('%Y-%m-%d')}...")
+        daily_df = pd.DataFrame({"DATA": pd.date_range(start=start_date, end=end_date, freq="D")})
         
-    # Mescla o Dólar diário no grid e preenche lacunas como finais de semana e feriados (ffill).
-    if not df_usd.empty:
-        daily_df = pd.merge(daily_df, df_usd, on="DATA", how="left")
-        daily_df["US$"] = daily_df["US$"].ffill()
+        # Mescla o Brent diário no grid e preenche finais de semana e feriados (ffill).
+        if not df_brent.empty:
+            daily_df = pd.merge(daily_df, df_brent, on="DATA", how="left")
+            daily_df["Barril US$"] = daily_df["Barril US$"].ffill()
+            
+        # Mescla o Dólar diário no grid e preenche lacunas como finais de semana e feriados (ffill).
+        if not df_usd.empty:
+            daily_df = pd.merge(daily_df, df_usd, on="DATA", how="left")
+            daily_df["US$"] = daily_df["US$"].ffill()
+            
+        # Mescla os novos preços de combustíveis da ANP e aplica forward fill (ffill).
+        if not final_df.empty:
+            daily_df = pd.merge(daily_df, final_df, on="DATA", how="left")
+            fuel_cols = [c for c in final_df.columns if c != "DATA"]
+            daily_df[fuel_cols] = daily_df[fuel_cols].ffill()
+            
+        # Combina o histórico com os novos dados
+        if df_existing is not None:
+            print("Concatenando novos dados ao histórico existente...")
+            daily_df = pd.concat([df_existing, daily_df], ignore_index=True)
+            
+        # Ordena a base cronologicamente.
+        daily_df = daily_df.sort_values(by='DATA')
         
-    # Mescla os preços de combustíveis da ANP e aplica forward fill (ffill).
-    # Isso fará com que o preço semanal (ou mensal nos anos iniciais) seja repetido dia a dia.
-    daily_df = pd.merge(daily_df, final_df, on="DATA", how="left")
-    fuel_cols = [c for c in final_df.columns if c != "DATA"]
-    daily_df[fuel_cols] = daily_df[fuel_cols].ffill()
-    
-    # Calcula o preço do barril de Brent em Reais (BRL) baseado nas cotações diárias.
-    if "Barril US$" in daily_df.columns and "US$" in daily_df.columns:
-        daily_df["Barril BRL"] = daily_df["Barril US$"] * daily_df["US$"]
+        # Reaplica forward fill (ffill) global para propagar os valores históricos sobre o novo grid
+        columns_to_ffill = ["Barril US$", "US$", "ETANOL HIDRATADO", "GASOLINA COMUM", "GLP", "ÓLEO DIESEL", "ÓLEO DIESEL S10"]
+        columns_to_ffill = [c for c in columns_to_ffill if c in daily_df.columns]
+        daily_df[columns_to_ffill] = daily_df[columns_to_ffill].ffill()
         
-    # --- Fim da Integração ---
-    
-    # Ordena a base cronologicamente.
-    daily_df = daily_df.sort_values(by='DATA')
-    
-    # Salva os dados consolidados diários em arquivo CSV.
-    output_files = "historico_precos_combustiveis.csv"
-    daily_df.to_csv(output_files, index=False, sep=';', decimal=',')
-    print(f"Arquivo salvo com sucesso: {output_files}")
-    
-    # Gera o arquivo .hyper com base no CSV recém-salvo
-    hyper_file = "historico_precos_combustiveis.hyper"
-    csv_to_hyper(output_files, hyper_file)
-    
-    print("Amostra dos dados (Início):")
-    print(daily_df.head())
-    print("Amostra dos dados (Fim):")
-    print(daily_df.tail())
+        # Calcula o preço do barril de Brent em Reais (BRL) baseado nas cotações diárias.
+        if "Barril US$" in daily_df.columns and "US$" in daily_df.columns:
+            daily_df["Barril BRL"] = daily_df["Barril US$"] * daily_df["US$"]
+            
+        # Salva os dados consolidados diários em arquivo CSV.
+        daily_df.to_csv(output_files, index=False, sep=';', decimal=',')
+        print(f"Arquivo salvo com sucesso: {output_files}")
+        
+        # Gera o arquivo .hyper com base no CSV recém-salvo
+        hyper_file = "historico_precos_combustiveis.hyper"
+        csv_to_hyper(output_files, hyper_file)
+    else:
+        print("Nenhum dado novo para processar. A base local já está atualizada.")
+        daily_df = df_existing
+        
+    if daily_df is not None and not daily_df.empty:
+        print("Amostra dos dados (Início):")
+        print(daily_df.head())
+        print("Amostra dos dados (Fim):")
+        print(daily_df.tail())
 
 if __name__ == "__main__":
-    download_and_process()
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Pipeline ETL de Preços de Petróleo e Combustíveis."
+    )
+    parser.add_argument(
+        "--full", 
+        action="store_true", 
+        help="Força a execução de uma carga histórica completa (full load) ignorando o cache local."
+    )
+    
+    args = parser.parse_args()
+    download_and_process(full_load=args.full)
