@@ -63,3 +63,36 @@ pip install -r requirements.txt
 Após a execução bem-sucedida, os seguintes arquivos serão criados ou atualizados na raiz do projeto:
 * `historico_precos_combustiveis.csv`: Arquivo CSV separado por ponto e vírgula (`;`) e com vírgula (`,`) como separador decimal, ideal para ser lido em ferramentas de análise ou Excel.
 * `historico_precos_combustiveis.hyper`: Extrato nativo do Tableau pronto para consumo pelo workbook `Combustiveis.twb`.
+
+---
+
+## ⏰ Automação e Agendamento Diário
+
+O projeto conta com uma rotina automatizada no macOS via **Launchd** para atualização incremental diária da base.
+
+### 📌 Informações de Agendamento
+* **Script de Execução**: `/Users/sandromollica/Developer/tools/scripts/diario_petroleo.sh`
+* **Arquivo de Agendamento (LaunchAgent)**: `~/Library/LaunchAgents/com.sandro.diariopetroleo.plist`
+* **Periodicidade**: Todos os dias às **09:00**.
+
+### 📝 Logs de Execução
+* **Log do Pipeline / Script**: `/Users/sandromollica/Library/Logs/diario_petroleo.log`
+* **Log de Saída Padrão (Launchd stdout)**: `/Users/sandromollica/Library/Logs/diario_petroleo.launchd.log`
+* **Log de Erros (Launchd stderr)**: `/Users/sandromollica/Library/Logs/diario_petroleo.launchd.err`
+
+### ⚙️ Comandos Úteis
+
+```bash
+# Dar permissão de execução ao script no Terminal:
+chmod +x /Users/sandromollica/Developer/tools/scripts/diario_petroleo.sh
+
+# Executar manualmente:
+/Users/sandromollica/Developer/tools/scripts/diario_petroleo.sh
+
+# Carregar / ativar a rotina diária no macOS:
+launchctl load ~/Library/LaunchAgents/com.sandro.diariopetroleo.plist
+
+# Descarregar / pausar a rotina diária:
+launchctl unload ~/Library/LaunchAgents/com.sandro.diariopetroleo.plist
+```
+
